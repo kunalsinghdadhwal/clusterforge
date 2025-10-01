@@ -97,21 +97,26 @@ pub fn load_and_process_data(file_path: &str, end_date: Option<&str>) -> crate::
     let reference_date = DateTime::parse_from_rfc3339(end_date_str)?
         .with_timezone(&Utc);
 
-    // Load data using Polars
+    // Load data using Polars with proper schema inference
     let df = LazyCsvReader::new(file_path)
+        .with_infer_schema_length(Some(10000))
+        .with_ignore_errors(true)
         .finish()?
         .filter(
-            // Filter out invalid rows
+            // Filter out invalid rows (cancellations start with 'C')
             col("Quantity").gt(0)
                 .and(col("UnitPrice").gt(0.0))
                 .and(col("CustomerID").is_not_null())
         )
         .with_columns([
-            // Parse InvoiceDate and add TotalAmount
+            // Parse InvoiceDate with the correct format: MM/DD/YYYY HH:MM:SS
             col("InvoiceDate").str().to_datetime(
                 Some(TimeUnit::Microseconds),
                 None,
-                StrptimeOptions::default(),
+                StrptimeOptions {
+                    format: Some("%m/%d/%Y %H:%M:%S".to_string()),
+                    ..Default::default()
+                },
                 lit("raise")
             ),
             (col("Quantity") * col("UnitPrice")).alias("TotalAmount")
@@ -147,14 +152,15 @@ fn compute_rfm_features(df: DataFrame, reference_date: DateTime<Utc>) -> crate::
         .agg([
             // Recency: days since last purchase
             col("InvoiceDate").max().alias("LastPurchaseDate"),
-            // Frequency: number of unique invoices
-            col("InvoiceNo").n_unique().alias("Frequency"),
+            // Frequency: number of unique invoices (cast to f64)
+            col("InvoiceNo").n_unique().cast(DataType::Float64).alias("Frequency"),
             // Monetary: total spending
             col("TotalAmount").sum().alias("Monetary")
         ])
         .with_columns([
             // Calculate recency in days
             ((lit(reference_timestamp) - col("LastPurchaseDate")) / lit(1_000_000) / lit(86400))
+                .cast(DataType::Float64)
                 .alias("Recency")
         ])
         .select([
@@ -186,14 +192,13 @@ fn prepare_features(df: DataFrame) -> crate::Result<(Array2<f64>, Vec<i64>, Stan
         .into_no_null_iter()
         .collect();
 
-    // Extract RFM features
+    // Extract RFM features (all should be Float64 now)
     let recency: Vec<f64> = df.column("Recency")?
         .f64()?
         .into_no_null_iter()
         .collect();
     
     let frequency: Vec<f64> = df.column("Frequency")?
-        .cast(&DataType::Float64)?
         .f64()?
         .into_no_null_iter()
         .collect();
@@ -228,10 +233,11 @@ mod tests {
     fn create_test_csv() -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "InvoiceNo,StockCode,Description,Quantity,InvoiceDate,UnitPrice,CustomerID,Country").unwrap();
-        writeln!(file, "536365,85123A,WHITE HANGING HEART T-LIGHT HOLDER,6,2010-12-01T08:26:00,2.55,17850,United Kingdom").unwrap();
-        writeln!(file, "536365,71053,WHITE METAL LANTERN,6,2010-12-01T08:26:00,3.39,17850,United Kingdom").unwrap();
-        writeln!(file, "536366,22633,HAND WARMER UNION JACK,6,2010-12-01T08:28:00,1.85,17850,United Kingdom").unwrap();
-        writeln!(file, "536367,84406B,CREAM CUPID HEARTS COAT HANGER,8,2010-12-01T08:34:00,2.75,13047,United Kingdom").unwrap();
+        writeln!(file, "536365,85123A,WHITE HANGING HEART T-LIGHT HOLDER,6,12/01/2010 08:26:00,2.55,17850,United Kingdom").unwrap();
+        writeln!(file, "536365,71053,WHITE METAL LANTERN,6,12/01/2010 08:26:00,3.39,17850,United Kingdom").unwrap();
+        writeln!(file, "536366,22633,HAND WARMER UNION JACK,6,12/01/2010 08:28:00,1.85,17850,United Kingdom").unwrap();
+        writeln!(file, "536367,84406B,CREAM CUPID HEARTS COAT HANGER,8,12/01/2010 08:34:00,2.75,13047,United Kingdom").unwrap();
+        writeln!(file, "C536368,22632,HAND WARMER RED POLKA DOT,-6,12/01/2010 08:35:00,1.85,17850,United Kingdom").unwrap(); // Cancellation - should be filtered
         file
     }
 
