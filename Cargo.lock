@@ -310,10 +310,12 @@ dependencies = [
  "clap",
  "linfa",
  "linfa-clustering",
+ "linfa-nn",
  "linfa-preprocessing",
  "ndarray",
  "plotters",
  "polars",
+ "rand",
  "serde",
  "tempfile",
 ]

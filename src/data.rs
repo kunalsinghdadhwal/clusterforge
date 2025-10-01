@@ -4,6 +4,60 @@ use chrono::{DateTime, Utc};
 use ndarray::{Array2, Array1};
 use polars::prelude::*;
 
+/// Simple StandardScaler implementation for feature normalization
+#[derive(Debug, Clone)]
+pub struct StandardScaler {
+    pub mean: Array1<f64>,
+    pub std: Array1<f64>,
+}
+
+impl StandardScaler {
+    /// Fit the scaler to data
+    pub fn fit(data: &Array2<f64>) -> Self {
+        let n_samples = data.nrows();
+        let n_features = data.ncols();
+        
+        let mut mean = Array1::zeros(n_features);
+        let mut std = Array1::zeros(n_features);
+        
+        // Calculate mean
+        for col_idx in 0..n_features {
+            let col_sum: f64 = data.column(col_idx).iter().sum();
+            mean[col_idx] = col_sum / n_samples as f64;
+        }
+        
+        // Calculate standard deviation
+        for col_idx in 0..n_features {
+            let variance: f64 = data.column(col_idx)
+                .iter()
+                .map(|&x| (x - mean[col_idx]).powi(2))
+                .sum::<f64>() / n_samples as f64;
+            std[col_idx] = variance.sqrt().max(1e-8); // Avoid division by zero
+        }
+        
+        StandardScaler { mean, std }
+    }
+    
+    /// Transform data using fitted parameters
+    pub fn transform(&self, data: &Array2<f64>) -> Array2<f64> {
+        let mut normalized = data.clone();
+        for col_idx in 0..data.ncols() {
+            for row_idx in 0..data.nrows() {
+                normalized[[row_idx, col_idx]] = 
+                    (data[[row_idx, col_idx]] - self.mean[col_idx]) / self.std[col_idx];
+            }
+        }
+        normalized
+    }
+    
+    /// Fit and transform in one step
+    pub fn fit_transform(data: &Array2<f64>) -> (Self, Array2<f64>) {
+        let scaler = Self::fit(data);
+        let transformed = scaler.transform(data);
+        (scaler, transformed)
+    }
+}
+
 /// RFM data structure containing processed features and scaler
 #[derive(Debug)]
 pub struct RfmData {
@@ -12,7 +66,7 @@ pub struct RfmData {
     /// Customer IDs corresponding to each row
     pub customer_ids: Vec<i64>,
     /// Fitted StandardScaler for normalizing new data
-    pub scaler: StandardScaler<f64>,
+    pub scaler: StandardScaler,
     /// Raw RFM values before normalization
     pub raw_features: Array2<f64>,
 }
@@ -25,7 +79,7 @@ impl RfmData {
         }
         
         let input = Array2::from_shape_vec((1, 3), rfm.to_vec())?;
-        let scaled = self.scaler.transform(input);
+        let scaled = self.scaler.transform(&input);
         Ok(scaled.row(0).to_owned())
     }
 }
@@ -43,8 +97,9 @@ pub fn load_and_process_data(file_path: &str, end_date: Option<&str>) -> crate::
     let reference_date = DateTime::parse_from_rfc3339(end_date_str)?
         .with_timezone(&Utc);
 
-    // Load data using Polars lazy frame for efficiency
-    let df = LazyFrame::scan_csv(file_path, ScanArgsCSV::default())?
+    // Load data using Polars
+    let df = LazyCsvReader::new(file_path)
+        .finish()?
         .filter(
             // Filter out invalid rows
             col("Quantity").gt(0)
@@ -53,8 +108,12 @@ pub fn load_and_process_data(file_path: &str, end_date: Option<&str>) -> crate::
         )
         .with_columns([
             // Parse InvoiceDate and add TotalAmount
-            col("InvoiceDate").str().strptime(PolarsDataType::Datetime(TimeUnit::Microseconds, None), 
-                StrptimeOptions::default()),
+            col("InvoiceDate").str().to_datetime(
+                Some(TimeUnit::Microseconds),
+                None,
+                StrptimeOptions::default(),
+                lit("raise")
+            ),
             (col("Quantity") * col("UnitPrice")).alias("TotalAmount")
         ])
         .collect()?;
@@ -95,7 +154,7 @@ fn compute_rfm_features(df: DataFrame, reference_date: DateTime<Utc>) -> crate::
         ])
         .with_columns([
             // Calculate recency in days
-            ((lit(reference_timestamp) - col("LastPurchaseDate")) / 1_000_000 / 86400)
+            ((lit(reference_timestamp) - col("LastPurchaseDate")) / lit(1_000_000) / lit(86400))
                 .alias("Recency")
         ])
         .select([
@@ -120,7 +179,7 @@ fn compute_rfm_features(df: DataFrame, reference_date: DateTime<Utc>) -> crate::
 }
 
 /// Convert DataFrame to ndarray and apply StandardScaler normalization
-fn prepare_features(df: DataFrame) -> crate::Result<(Array2<f64>, Vec<i64>, StandardScaler<f64>, Array2<f64>)> {
+fn prepare_features(df: DataFrame) -> crate::Result<(Array2<f64>, Vec<i64>, StandardScaler, Array2<f64>)> {
     // Extract customer IDs
     let customer_ids: Vec<i64> = df.column("CustomerID")?
         .i64()?
@@ -155,11 +214,7 @@ fn prepare_features(df: DataFrame) -> crate::Result<(Array2<f64>, Vec<i64>, Stan
     let raw_features = Array2::from_shape_vec((n_samples, 3), raw_data.clone())?;
     
     // Create and fit StandardScaler
-    let dataset = Dataset::new(raw_features.clone(), Array1::zeros(n_samples));
-    let scaler = StandardScaler::default().fit(&dataset)?;
-    
-    // Transform features
-    let normalized_features = scaler.transform(raw_features.clone());
+    let (scaler, normalized_features) = StandardScaler::fit_transform(&raw_features);
     
     Ok((normalized_features, customer_ids, scaler, raw_features))
 }
@@ -173,10 +228,10 @@ mod tests {
     fn create_test_csv() -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "InvoiceNo,StockCode,Description,Quantity,InvoiceDate,UnitPrice,CustomerID,Country").unwrap();
-        writeln!(file, "536365,85123A,WHITE HANGING HEART T-LIGHT HOLDER,6,2010-12-01T08:26:00Z,2.55,17850,United Kingdom").unwrap();
-        writeln!(file, "536365,71053,WHITE METAL LANTERN,6,2010-12-01T08:26:00Z,3.39,17850,United Kingdom").unwrap();
-        writeln!(file, "536366,22633,HAND WARMER UNION JACK,6,2010-12-01T08:28:00Z,1.85,17850,United Kingdom").unwrap();
-        writeln!(file, "536367,84406B,CREAM CUPID HEARTS COAT HANGER,8,2010-12-01T08:34:00Z,2.75,13047,United Kingdom").unwrap();
+        writeln!(file, "536365,85123A,WHITE HANGING HEART T-LIGHT HOLDER,6,2010-12-01T08:26:00,2.55,17850,United Kingdom").unwrap();
+        writeln!(file, "536365,71053,WHITE METAL LANTERN,6,2010-12-01T08:26:00,3.39,17850,United Kingdom").unwrap();
+        writeln!(file, "536366,22633,HAND WARMER UNION JACK,6,2010-12-01T08:28:00,1.85,17850,United Kingdom").unwrap();
+        writeln!(file, "536367,84406B,CREAM CUPID HEARTS COAT HANGER,8,2010-12-01T08:34:00,2.75,13047,United Kingdom").unwrap();
         file
     }
 
@@ -206,5 +261,22 @@ mod tests {
         
         let scaled = result.unwrap();
         assert_eq!(scaled.len(), 3);
+    }
+    
+    #[test]
+    fn test_standard_scaler() {
+        let data = Array2::from_shape_vec((4, 2), vec![
+            1.0, 2.0,
+            2.0, 4.0,
+            3.0, 6.0,
+            4.0, 8.0,
+        ]).unwrap();
+        
+        let scaler = StandardScaler::fit(&data);
+        let transformed = scaler.transform(&data);
+        
+        // Check that mean is close to 0
+        let col0_mean: f64 = transformed.column(0).iter().sum::<f64>() / 4.0;
+        assert!(col0_mean.abs() < 1e-10);
     }
 }

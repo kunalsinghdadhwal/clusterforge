@@ -2,14 +2,15 @@
 
 use ndarray::{Array1, Array2};
 use linfa::prelude::*;
-use linfa_clustering::{KMeansConfig, KMeans};
+use linfa_clustering::KMeans;
+use linfa_nn::distance::L2Dist;
 use crate::data::RfmData;
 
 /// K-Means model wrapper with fitted parameters
 #[derive(Debug)]
 pub struct KMeansModel {
     /// Fitted K-Means model from linfa
-    pub model: KMeans<f64>,
+    pub model: KMeans<f64, L2Dist>,
     /// Number of clusters
     pub n_clusters: usize,
     /// Cluster assignments for training data
@@ -27,11 +28,24 @@ impl KMeansModel {
             anyhow::bail!("Feature vector must have exactly 3 dimensions");
         }
         
-        let input = features.clone().into_shape((1, 3))?;
-        let dataset = Dataset::new(input, Array1::zeros(1));
-        let predictions = self.model.predict(dataset);
+        // Find nearest centroid
+        let mut min_distance = f64::INFINITY;
+        let mut closest_cluster = 0;
         
-        Ok(predictions[0])
+        for (cluster_idx, centroid) in self.centroids.outer_iter().enumerate() {
+            let distance: f64 = features.iter()
+                .zip(centroid.iter())
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            
+            if distance < min_distance {
+                min_distance = distance;
+                closest_cluster = cluster_idx;
+            }
+        }
+        
+        Ok(closest_cluster)
     }
 
     /// Get cluster sizes
@@ -129,13 +143,12 @@ pub fn fit_kmeans(
 
     // Create dataset for linfa
     let n_samples = rfm_data.features.nrows();
-    let targets = Array1::zeros(n_samples); // Dummy targets for unsupervised learning
+    let targets: Array1<usize> = Array1::zeros(n_samples); // Dummy targets for unsupervised learning
     let dataset = Dataset::new(rfm_data.features.clone(), targets);
 
     // Configure and fit K-Means
-    let model = KMeansConfig::default()
-        .n_clusters(n_clusters)
-        .max_n_iterations(max_iters)
+    let model = KMeans::params_with(n_clusters, rand::thread_rng(), L2Dist)
+        .max_n_iterations(max_iters as u64)
         .tolerance(tolerance)
         .fit(&dataset)?;
 
@@ -205,9 +218,7 @@ fn euclidean_distance(point1: &ndarray::ArrayView1<f64>, point2: &ndarray::Array
 mod tests {
     use super::*;
     use ndarray::Array2;
-    use crate::data::RfmData;
-    use linfa_preprocessing::StandardScaler;
-    use linfa::Dataset;
+    use crate::data::{RfmData, StandardScaler};
 
     fn create_test_rfm_data() -> RfmData {
         // Create sample normalized features (4 samples, 3 features)
@@ -225,8 +236,7 @@ mod tests {
             20.0, 3.0, 750.0,
         ]).unwrap();
         
-        let dataset = Dataset::new(raw_features.clone(), Array1::zeros(4));
-        let scaler = StandardScaler::default().fit(&dataset).unwrap();
+        let scaler = StandardScaler::fit(&raw_features);
         
         RfmData {
             features,

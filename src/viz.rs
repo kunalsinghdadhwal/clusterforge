@@ -202,10 +202,10 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
     use std::path::Path;
-    use crate::data::RfmData;
+    use crate::data::{RfmData, StandardScaler};
     use linfa::{Dataset, prelude::*};
-    use linfa_preprocessing::StandardScaler;
-    use linfa_clustering::{KMeansConfig, KMeans};
+    use linfa_clustering::KMeans;
+    use linfa_nn::distance::L2Dist;
     use ndarray::{Array1, Array2};
 
     fn create_test_data() -> (RfmData, KMeansModel) {
@@ -220,8 +220,7 @@ mod tests {
         ]).unwrap();
         
         let raw_features = features.clone();
-        let dataset = Dataset::new(raw_features.clone(), Array1::zeros(6));
-        let scaler = StandardScaler::default().fit(&dataset).unwrap();
+        let scaler = StandardScaler::fit(&raw_features);
         
         let rfm_data = RfmData {
             features: features.clone(),
@@ -230,20 +229,14 @@ mod tests {
             raw_features,
         };
         
-        // Create mock K-Means model
-        let labels = Array1::from_vec(vec![0, 1, 0, 1, 2, 0]);
-        let centroids = Array2::from_shape_vec((3, 3), vec![
-            -0.5, 0.1, -0.7,  // Cluster 0 centroid
-             0.7, 0.2,  0.7,  // Cluster 1 centroid
-             0.0, 0.0,  0.0,  // Cluster 2 centroid
-        ]).unwrap();
-        
-        // Create a dummy linfa model
-        let dataset = Dataset::new(features, Array1::zeros(6));
-        let linfa_model = KMeansConfig::default()
-            .n_clusters(3)
+        // Create K-Means model
+        let dataset: Dataset<f64, usize, ndarray::Dim<[usize; 1]>> = Dataset::new(features, Array1::zeros(6));
+        let linfa_model = KMeans::params_with(3, rand::thread_rng(), L2Dist)
             .fit(&dataset)
             .unwrap();
+        
+        let labels = linfa_model.predict(&dataset);
+        let centroids = linfa_model.centroids().clone();
         
         let model = KMeansModel {
             model: linfa_model,
