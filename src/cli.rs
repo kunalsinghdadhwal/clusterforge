@@ -45,14 +45,20 @@ impl Args {
             if parts.len() != 3 {
                 anyhow::bail!("Predict values must be in format 'recency,frequency,monetary'");
             }
-            
-            let recency: f64 = parts[0].trim().parse()
+
+            let recency: f64 = parts[0]
+                .trim()
+                .parse()
                 .map_err(|_| anyhow::anyhow!("Invalid recency value: {}", parts[0]))?;
-            let frequency: f64 = parts[1].trim().parse()
+            let frequency: f64 = parts[1]
+                .trim()
+                .parse()
                 .map_err(|_| anyhow::anyhow!("Invalid frequency value: {}", parts[1]))?;
-            let monetary: f64 = parts[2].trim().parse()
+            let monetary: f64 = parts[2]
+                .trim()
+                .parse()
                 .map_err(|_| anyhow::anyhow!("Invalid monetary value: {}", parts[2]))?;
-            
+
             Ok(Some((recency, frequency, monetary)))
         } else {
             Ok(None)
